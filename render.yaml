@@ -7,7 +7,7 @@ services:
       cd frontend
       npm ci
       npm run build
-    startCommand: python -m gunicorn backend.app:app --bind 0.0.0.0:$PORT --workers 4
+    startCommand: python -m gunicorn backend.app:app --bind 0.0.0.0:$PORT --workers 1
     envVars:
       - key: GROQ_API_KEY
         sync: false
