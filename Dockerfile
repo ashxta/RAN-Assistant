@@ -39,4 +39,5 @@ COPY --from=frontend-builder /app/frontend/build ./frontend/build
 EXPOSE 8000
 
 # Use shell form so $PORT is expanded at runtime
-CMD sh -c "python -m gunicorn backend.app:app --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 120"
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+CMD ["sh", "-c", "exec gunicorn backend.app:app --bind 0.0.0.0:${PORT} --workers 1 --timeout 120"]
