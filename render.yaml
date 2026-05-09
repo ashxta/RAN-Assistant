@@ -3,11 +3,10 @@ services:
     name: ranassist-ai
     env: python
     buildCommand: |
+      pip install -r backend/requirements.txt
       cd frontend
       npm ci
       npm run build
-      cd ../backend
-      pip install -r requirements.txt
     startCommand: gunicorn backend.app:app --bind 0.0.0.0:$PORT --workers 4
     envVars:
       - key: GROQ_API_KEY
