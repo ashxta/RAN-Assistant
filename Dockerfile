@@ -1,9 +1,9 @@
 # Multi-stage build
 FROM node:24-alpine AS frontend-builder
-WORKDIR /app
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
-COPY frontend ./
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm ci --legacy-peer-deps
+COPY frontend .
 RUN npm run build
 
 # Python backend
@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy built frontend
-COPY --from=frontend-builder /app/build ./frontend/build
+# Copy built frontend from builder stage
+COPY --from=frontend-builder /app/frontend/build ./frontend/build
 
 # Copy backend
 COPY backend/requirements.txt ./backend/
