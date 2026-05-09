@@ -1,144 +1,120 @@
-
+import os
+import json
+import numpy as np
 from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
 from groq import Groq
 from sentence_transformers import SentenceTransformer
 import faiss
-import numpy as np
-import os
-from PyPDF2 import PdfReader
 
-frontend_build_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "build")
-app = Flask(__name__, static_folder=frontend_build_path, static_url_path="")
-CORS(app)
+# ─── Config ───────────────────────────────────────────────────────────────────
+# Read the API key from the environment variable set in Render dashboard.
+# Never hardcode secrets in source code.
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY environment variable is not set!")
 
-# ======================
-# Configure Groq API Key
-# ======================
+# Paths
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+DOCS_DIR    = os.path.join(BASE_DIR, "telecom_docs")
+BUILD_DIR   = os.path.join(BASE_DIR, "..", "frontend", "build")
 
-groq_api_key = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=groq_api_key) if groq_api_key else None
+# ─── Flask App ────────────────────────────────────────────────────────────────
+app = Flask(__name__, static_folder=BUILD_DIR, static_url_path="")
 
-# ======================
-# Load Telecom Documents
-# ======================
+# ─── Load Telecom Knowledge Base ──────────────────────────────────────────────
+def load_docs(docs_dir):
+    """Load all .txt files from the telecom_docs folder."""
+    chunks = []
+    if os.path.isdir(docs_dir):
+        for filename in os.listdir(docs_dir):
+            if filename.endswith(".txt"):
+                filepath = os.path.join(docs_dir, filename)
+                with open(filepath, "r", encoding="utf-8") as f:
+                    text = f.read()
+                    # Split into ~500-char chunks with overlap
+                    for i in range(0, len(text), 400):
+                        chunk = text[i:i + 500].strip()
+                        if chunk:
+                            chunks.append(chunk)
+    return chunks
 
-documents = []
+print("Loading documents...")
+DOCS = load_docs(DOCS_DIR)
 
-docs_path = "telecom_docs"
+print("Loading embedding model...")
+EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 
-for file in os.listdir(docs_path):
-    file_path = os.path.join(docs_path, file)
-    
-    if file.endswith(".txt"):
-        with open(file_path, "r", encoding="utf-8") as f:
-            documents.append(f.read())
-    
-    elif file.endswith(".pdf"):
-        try:
-            with open(file_path, "rb") as f:
-                pdf_reader = PdfReader(f)
-                text = ""
-                for page in pdf_reader.pages:
-                    text += page.extract_text()
-                if text.strip():
-                    documents.append(text)
-        except Exception as e:
-            print(f"Error reading {file}: {e}")
+print("Building FAISS index...")
+if DOCS:
+    embeddings = EMBED_MODEL.encode(DOCS, show_progress_bar=False).astype("float32")
+    INDEX = faiss.IndexFlatL2(embeddings.shape[1])
+    INDEX.add(embeddings)
+else:
+    INDEX = None
 
-# Handle empty documents
-if not documents:
-    documents = ["No documents available. Default response."]
+groq_client = Groq(api_key=GROQ_API_KEY)
 
-# ======================
-# Embeddings
-# ======================
+# ─── RAG Helper ───────────────────────────────────────────────────────────────
+def retrieve_context(query, top_k=3):
+    """Return the top-k most relevant document chunks for the query."""
+    if INDEX is None or not DOCS:
+        return ""
+    q_emb = EMBED_MODEL.encode([query]).astype("float32")
+    _, indices = INDEX.search(q_emb, top_k)
+    context_chunks = [DOCS[i] for i in indices[0] if i < len(DOCS)]
+    return "\n\n".join(context_chunks)
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
-
-embeddings = model.encode(documents, convert_to_numpy=True)
-
-# Ensure embeddings is 2D
-if embeddings.ndim == 1:
-    embeddings = embeddings.reshape(1, -1)
-
-dimension = embeddings.shape[1]
-
-# Normalize embeddings so inner product approximates cosine similarity
-embeddings = embeddings / np.clip(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12, None)
-
-index = faiss.IndexFlatIP(dimension)
-
-index.add(np.array(embeddings).astype('float32'))
-
-TOP_K = 3
-MIN_SIMILARITY = 0.25
-OUT_OF_SCOPE_MESSAGE = "Out of scope."
-
-# ======================
-# Ask Endpoint
-# ======================
-
-@app.route('/ask', methods=['POST'])
+# ─── API Routes ───────────────────────────────────────────────────────────────
+@app.route("/api/ask", methods=["POST"])
 def ask():
-    if client is None:
-        return jsonify({"answer": "Server is missing GROQ_API_KEY."}), 500
+    data    = request.get_json(force=True)
+    question = data.get("question", "").strip()
 
-    data = request.json
-    question = data['question']
+    if not question:
+        return jsonify({"error": "No question provided"}), 400
 
-    query_embedding = model.encode([question], convert_to_numpy=True)
-    query_embedding = query_embedding / np.clip(
-        np.linalg.norm(query_embedding, axis=1, keepdims=True), 1e-12, None
+    context = retrieve_context(question)
+
+    system_prompt = (
+        "You are RANAssist, an expert AI assistant specialized in Telecom RAN "
+        "(Radio Access Networks), 4G LTE, 5G NR, network slicing, beamforming, "
+        "and related telecom topics. Answer clearly and concisely based on the "
+        "context provided. If the context does not contain the answer, use your "
+        "general telecom knowledge.\n\n"
+        f"Context:\n{context}"
     )
 
-    D, I = index.search(np.array(query_embedding).astype('float32'), k=min(TOP_K, len(documents)))
-
-    if len(D) == 0 or len(D[0]) == 0 or D[0][0] < MIN_SIMILARITY:
-        return jsonify({
-            "answer": OUT_OF_SCOPE_MESSAGE
-        })
-
-    context = ""
-
-    for idx in I[0]:
-        if idx < len(documents):
-            # Truncate each document to 1000 chars to avoid token limit
-            context += documents[idx][:1000] + "\n"
-
-    completion = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+    response = groq_client.chat.completions.create(
+        model="llama3-8b-8192",
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are an expert telecom RAN assistant. "
-                    "Only answer questions that are strictly about telecom RAN and supported by the provided context. "
-                    "If the question is out of scope or not covered by the context, reply with: "
-                    f"{OUT_OF_SCOPE_MESSAGE}"
-                )
-            },
-            {
-                "role": "user",
-                "content": f"Context:\n{context}\n\nQuestion: {question}"
-            }
-        ]
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": question},
+        ],
+        max_tokens=512,
+        temperature=0.3,
     )
 
-    answer = completion.choices[0].message.content
+    answer = response.choices[0].message.content
+    return jsonify({"answer": answer})
 
-    return jsonify({
-        "answer": answer
-    })
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "docs_loaded": len(DOCS)})
 
-@app.route("/")
-def serve_index():
-    return send_from_directory(app.static_folder, "index.html")
+# ─── Serve React Frontend ─────────────────────────────────────────────────────
+# This is REQUIRED for single-container deployment on Render.
+# Flask serves the built React app for every non-API route.
 
+@app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
-def serve_static(path):
-    return send_from_directory(app.static_folder, path)
+def serve_react(path):
+    full_path = os.path.join(BUILD_DIR, path)
+    if path and os.path.exists(full_path):
+        return send_from_directory(BUILD_DIR, path)
+    # For any unknown route, return index.html so React Router works
+    return send_from_directory(BUILD_DIR, "index.html")
 
-if __name__ == '__main__':
-    port = int(os.getenv("PORT", "5000"))
+# ─── Entry Point ──────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
