@@ -29,4 +29,4 @@ COPY backend/telecom_docs ./backend/telecom_docs
 EXPOSE 8000
 
 # Start app
-CMD ["python", "-m", "gunicorn", "backend.app:app", "--bind", "0.0.0.0:8000", "--workers", "1"]
+CMD ["sh", "-c", "python -m gunicorn backend.app:app --bind 0.0.0.0:${PORT:-8000} --workers 1"]
