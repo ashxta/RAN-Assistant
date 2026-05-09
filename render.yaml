@@ -1,13 +1,9 @@
 services:
   - type: web
     name: ranassist-ai
-    env: python
-    buildCommand: |
-      pip install -r backend/requirements.txt
-      cd frontend
-      npm ci
-      npm run build
-    startCommand: python -m gunicorn backend.app:app --bind 0.0.0.0:$PORT --workers 1
+    env: docker                  # ← uses your Dockerfile (has Node + Python)
+    dockerfilePath: ./Dockerfile
+    plan: free
     envVars:
       - key: GROQ_API_KEY
-        sync: false
+        sync: false              # ← you must paste this in the Render dashboard manually
